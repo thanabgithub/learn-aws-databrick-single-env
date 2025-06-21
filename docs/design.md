@@ -56,14 +56,14 @@ graph TB
         subgraph "Management Account (Root)"
             Org[AWS Organizations<br/>Governance & Billing]
             IDC[AWS Identity Center<br/>SSO for Team]
+            
+            subgraph "Terraform State Management"
+                TFS3[(S3: terraform-state-organization-apne1<br/>Versioned & Encrypted)]
+                TFDDB[(DynamoDB: terraform-state-lock<br/>State Locking)]
+            end
         end
         
         subgraph "Analytics Account (Single Environment)"
-            subgraph "Terraform State Management"
-                TFS3[(S3: terraform-state-*<br/>Versioned & Encrypted)]
-                TFDDB[(DynamoDB: terraform-state-lock<br/>State Locking)]
-            end
-            
             subgraph "VPC (10.0.0.0/16) - ap-northeast-1"
                 IGW[Internet Gateway]
                 
@@ -83,14 +83,9 @@ graph TB
                 end
                 
                 subgraph "Route Tables"
-                    PrivRT[Private Route Table<br/>• 10.0.0.0/16 → local<br/>• 0.0.0.0/0 → NAT<br/>• S3 → S3 Endpoint<br/>• DynamoDB → DDB Endpoint]
+                    PrivRT[Private Route Table<br/>Routes:<br/>• 10.0.0.0/16 → local<br/>• 0.0.0.0/0 → NAT<br/>• S3 prefix → AWS Network<br/>• DynamoDB prefix → AWS Network]
                     PubRT[Public Route Table<br/>• 10.0.0.0/16 → local<br/>• 0.0.0.0/0 → IGW]
                 end
-            end
-            
-            subgraph "Gateway Endpoints"
-                S3GW[S3 Gateway Endpoint<br/>For Databricks Traffic]
-                DDBGW[DynamoDB Gateway Endpoint<br/>For Databricks Traffic]
             end
             
             subgraph "Storage Layer"
@@ -120,9 +115,13 @@ graph TB
         DatabricksCP[Databricks<br/>Control Plane]
     end
     
-    GitLab -->|AWS API Calls| TFS3
+    subgraph "AWS Network"
+        AWSPrivate[AWS Private Backbone<br/>S3 & DynamoDB Access<br/>via Gateway Endpoints]
+    end
+    
+    GitLab -->|AWS API Calls<br/>terraform/state/organization.tfstate| TFS3
     GitLab -->|State Lock| TFDDB
-    Local -->|AWS API Calls| TFS3
+    Local -->|AWS API Calls<br/>terraform/state/organization.tfstate| TFS3
     Local -->|State Lock| TFDDB
     
     Users -->|SSO Login| IDC
@@ -138,13 +137,11 @@ graph TB
     PrivComp <--> RDS
     PrivComp -->|via ENI| STSENI
     
-    PrivRT -.->|References| S3GW
-    PrivRT -.->|References| DDBGW
-    
-    PrivComp -->|via Route Table| S3GW
-    S3GW -->|Routes traffic to| S3Raw
-    S3GW -->|Routes traffic to| S3Proc
-    S3GW -->|Routes traffic to| S3DB
+    PrivRT -.->|S3 traffic routed to| AWSPrivate
+    PrivRT -.->|DynamoDB traffic routed to| AWSPrivate
+    AWSPrivate --> S3Raw
+    AWSPrivate --> S3Proc
+    AWSPrivate --> S3DB
     
     DB --> UC
     UC --> S3Raw
@@ -156,14 +153,14 @@ graph TB
     classDef external fill:#e3f2fd,stroke:#2196f3,stroke-width:2px
     classDef storage fill:#569A31,stroke:#232F3E,stroke-width:2px,color:white
     classDef governance fill:#7b68ee,stroke:#232F3E,stroke-width:2px,color:white
-    classDef endpoint fill:#90EE90,stroke:#232F3E,stroke-width:2px
+    classDef network fill:#90EE90,stroke:#232F3E,stroke-width:2px
     classDef terraform fill:#7e57c2,stroke:#232F3E,stroke-width:2px,color:white
     
     class IGW,NAT,PubRT,PrivRT,PrivComp,RDS,DB,STSENI aws
     class S3Raw,S3Proc,S3DB storage
     class Users,Internet,DatabricksCP,GitLab,Local external
     class UC,CT governance
-    class S3GW,DDBGW endpoint
+    class AWSPrivate network
     class TFS3,TFDDB terraform
 ```
 
@@ -652,7 +649,7 @@ Attach AWS Managed Policy: `AdministratorAccess`
 ```mermaid
 graph TB
     subgraph "VPC: 10.0.0.0/16 (us-east-1)"
-        subgraph "Availability Zone: ap-northeast-1"
+        subgraph "Availability Zone: us-east-1a"
             subgraph "Public Subnet: 10.0.0.0/24"
                 IGW[Internet Gateway]
                 NAT[NAT Gateway<br/>$0.045/hour]
@@ -674,13 +671,16 @@ graph TB
             end
         end
         
-        subgraph "Route Tables & Gateway Endpoints"
+        subgraph "Route Tables"
             PubRT[Public Route Table<br/>• 10.0.0.0/16 → local<br/>• 0.0.0.0/0 → IGW]
-            PrivRT[Private Route Table<br/>• 10.0.0.0/16 → local<br/>• 0.0.0.0/0 → NAT<br/>• S3 Prefix List → S3 GW Endpoint<br/>• DDB Prefix List → DDB GW Endpoint]
-            
-            S3EP{{S3 Gateway Endpoint<br/>vpce-xxxxxx<br/>FREE}}
-            DDBEP{{DynamoDB Gateway Endpoint<br/>vpce-yyyyyy<br/>FREE}}
+            PrivRT[Private Route Table<br/>• 10.0.0.0/16 → local<br/>• 0.0.0.0/0 → NAT<br/>• S3 Prefix List → AWS Network<br/>• DDB Prefix List → AWS Network]
         end
+    end
+    
+    subgraph "AWS Network (Not in VPC)"
+        AWSBackbone[AWS Private Backbone<br/>Reached via Gateway Endpoints]
+        S3Service[(S3 Service)]
+        DDBService[(DynamoDB Service)]
     end
     
     subgraph "External Access"
@@ -698,13 +698,16 @@ graph TB
     
     Workers -->|HTTPS via ENI| STSENI
     Workers -->|S3 API calls| PrivRT
-    PrivRT -->|Routes to| S3EP
-    PrivRT -->|Routes to| DDBEP
+    PrivRT -.->|S3 traffic routes to| AWSBackbone
+    PrivRT -.->|DDB traffic routes to| AWSBackbone
+    AWSBackbone --> S3Service
+    AWSBackbone --> DDBService
     
     TerraformOps -.->|AWS APIs<br/>Not through VPC| Internet
     
-    style S3EP fill:#90EE90
-    style DDBEP fill:#90EE90
+    style AWSBackbone fill:#90EE90
+    style S3Service fill:#569A31,color:white
+    style DDBService fill:#569A31,color:white
     style STSENI fill:#FFE4B5
     style PrivRT fill:#e3f2fd
     style PubRT fill:#e3f2fd
@@ -714,16 +717,18 @@ graph TB
 ### VPC Endpoints Explained
 
 #### Gateway Endpoints (S3 & DynamoDB)
-- **Purpose**: Free data transfer for Databricks clusters accessing S3/DynamoDB
-- **Attachment Point**: Route tables (not physical resources)
-- **How it works**: Adds routes to your route table that direct S3/DynamoDB traffic to AWS network
-- **Cost**: FREE - no data transfer charges
-- **Important**: Only benefits traffic from within VPC (Databricks), not external Terraform operations
+- **What they are**: Route table configurations, not physical resources
+- **How they work**: Add routes to your route table that redirect S3/DynamoDB traffic to AWS's private network
+- **Where they exist**: As entries in your route tables only
+- **Traffic flow**: `EC2 → Route Table (sees endpoint route) → AWS Private Network → S3/DynamoDB`
+- **Cost**: FREE - no hourly charges, no data transfer charges
+- **Important**: Only benefits traffic originating from within the VPC
 
 #### Interface Endpoints (STS, etc.)
-- **Purpose**: Private connectivity for Databricks to AWS services
-- **Attachment Point**: Creates ENIs in specified subnets
-- **How it works**: Private IP addresses in your subnet that proxy requests to AWS services
+- **What they are**: Elastic Network Interfaces (ENIs) in your subnets
+- **How they work**: Create private IP addresses that act as proxies to AWS services
+- **Where they exist**: As actual network interfaces in your specified subnets
+- **Traffic flow**: `EC2 → ENI in subnet → AWS service`
 - **Cost**: $0.01/hour per AZ + data processing charges
 - **Configuration**: Select subnets and security groups during creation
 
@@ -1532,7 +1537,7 @@ databricks_account_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
 # Network Configuration
 vpc_cidr = "10.0.0.0/16"
-availability_zone = "ap-northeast-1"
+availability_zone = "us-east-1a"
 
 # Team Configuration
 admin_email = "admin@yourcompany.com"
@@ -2001,5 +2006,5 @@ Remember: Start simple, measure everything, and expand based on actual requireme
 
 ---
 
-*Last Updated: June 15, 2025*
-*Version: 2.0*
+*Last Updated: June 16, 2025*
+*Version: 2.1*
