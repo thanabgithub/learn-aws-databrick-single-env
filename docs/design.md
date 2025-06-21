@@ -180,6 +180,8 @@ graph TB
 | **Terraform State** | Infrastructure state | GitLab/local coordination |
 | **DynamoDB Table** | State locking | Prevent concurrent modifications |
 
+**Note**: The S3 bucket for Terraform state and DynamoDB table for state locking are pre-created through a bootstrap process rather than managed directly in the main configuration.
+
 ---
 
 ## Design Principles
@@ -319,54 +321,46 @@ Different SCPs for each OU demonstrate policy inheritance and override patterns:
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "DenyUnapprovedRegions",
+      "Sid": "EnforceMFA",
       "Effect": "Deny",
       "Action": "*",
-      "Resource": "*",
-      "Condition": {
-        "StringNotEquals": {
-          "aws:RequestedRegion": ["us-east-1"]
-        }
-      }
-    },
-    {
-      "Sid": "PreventRootUserActions",
-      "Effect": "Deny",
-      "Action": "*",
-      "Resource": "*",
-      "Condition": {
-        "StringLike": {
-          "aws:PrincipalArn": "arn:aws:iam::*:root"
-        }
-      }
-    },
-    {
-      "Sid": "RequireMFAForDeletion",
-      "Effect": "Deny",
-      "Action": [
-        "s3:DeleteBucket",
-        "rds:DeleteDBInstance",
-        "ec2:TerminateInstances"
-      ],
       "Resource": "*",
       "Condition": {
         "BoolIfExists": {
           "aws:MultiFactorAuthPresent": "false"
+        },
+        "StringNotLike": {
+          "aws:PrincipalArn": "arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/*"
         }
       }
     },
     {
-      "Sid": "EnforceStateBackupTags",
+      "Sid": "RequireResourceTags",
       "Effect": "Deny",
       "Action": [
-        "s3:CreateBucket",
-        "s3:PutObject"
+        "ec2:RunInstances",
+        "rds:CreateDBInstance"
       ],
-      "Resource": "arn:aws:s3:::terraform-state-*",
+      "Resource": "*",
+      "Condition": {
+        "Null": {
+          "aws:RequestTag/Environment": "true"
+        }
+      }
+    },
+    {
+      "Sid": "EnforceSingleRegion",
+      "Effect": "Deny",
+      "NotAction": [
+        "cloudfront:*",
+        "iam:*",
+        "route53:*",
+        "support:*"
+      ],
+      "Resource": "*",
       "Condition": {
         "StringNotEquals": {
-          "aws:RequestTag/Terraform": "true",
-          "aws:RequestTag/Critical": "true"
+          "aws:RequestedRegion": "ap-northeast-1"
         }
       }
     }
@@ -380,23 +374,7 @@ Different SCPs for each OU demonstrate policy inheritance and override patterns:
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "DenyExpensiveInstances",
-      "Effect": "Deny",
-      "Action": "ec2:RunInstances",
-      "Resource": "arn:aws:ec2:*:*:instance/*",
-      "Condition": {
-        "ForAnyValue:StringEquals": {
-          "ec2:InstanceType": [
-            "p3.16xlarge",
-            "p3dn.24xlarge",
-            "x1e.32xlarge",
-            "m5.24xlarge"
-          ]
-        }
-      }
-    },
-    {
-      "Sid": "EnforceDevTagging",
+      "Sid": "LimitExpensiveResources",
       "Effect": "Deny",
       "Action": [
         "ec2:RunInstances",
@@ -404,8 +382,9 @@ Different SCPs for each OU demonstrate policy inheritance and override patterns:
       ],
       "Resource": "*",
       "Condition": {
-        "StringNotEquals": {
-          "aws:RequestTag/Environment": "development"
+        "StringNotLike": {
+          "ec2:InstanceType": ["t3.micro", "t3.small"],
+          "rds:DatabaseClass": ["db.t3.micro", "db.t3.small"]
         }
       }
     }
@@ -422,25 +401,24 @@ Different SCPs for each OU demonstrate policy inheritance and override patterns:
       "Sid": "DenyProductionServices",
       "Effect": "Deny",
       "Action": [
-        "rds:*",
+        "cloudformation:*",
+        "dynamodb:*",
         "elasticache:*",
-        "es:*",
-        "kafka:*"
+        "elasticbeanstalk:*",
+        "elasticloadbalancing:*",
+        "lambda:*",
+        "rds:*"
       ],
       "Resource": "*"
     },
     {
-      "Sid": "LimitEC2Size",
+      "Sid": "LimitEC2Instances",
       "Effect": "Deny",
       "Action": "ec2:RunInstances",
-      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Resource": "*",
       "Condition": {
-        "ForAnyValue:StringNotLike": {
-          "ec2:InstanceType": [
-            "t3.*",
-            "t2.micro",
-            "t2.small"
-          ]
+        "StringNotEquals": {
+          "ec2:InstanceType": "t3.micro"
         }
       }
     }
